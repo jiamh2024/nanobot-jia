@@ -35,7 +35,8 @@ Returns JSON with:
 ### Detailed Forecast
 
 ```bash
-curl -s "https://api.open-meteo.com/v1/forecast?latitude=22.63&longitude=114.04&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&hourly=temperature_2m,precipitation_probability"
+###curl -s "https://api.open-meteo.com/v1/forecast?latitude=22.63&longitude=114.04&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&hourly=temperature_2m,precipitation_probability"
+curl -s "https://api.open-meteo.com/v1/forecast?latitude=22.63&longitude=114.04&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&hourly=temperature_2m"
 ```
 
 ### Weather Code Reference

@@ -45,7 +45,7 @@ def _validate_url(url: str) -> tuple[bool, str]:
 
 
 class WebSearchTool(Tool):
-    """Search the web using DuckDuckGo (free, no API key required)."""
+    """Search the web using configured provider (Tavily or DuckDuckGo fallback)."""
 
     name = "web_search"
     description = "Search the web. Returns titles, URLs, and snippets."
@@ -61,55 +61,109 @@ class WebSearchTool(Tool):
     def __init__(self, api_key: str | None = None, max_results: int = 5, proxy: str | None = None):
         self.max_results = max_results
         self.proxy = proxy
+        self.api_key = api_key
 
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
         try:
             n = min(max(count or self.max_results, 1), 10)
             logger.debug("WebSearch: {}", "proxy enabled" if self.proxy else "direct connection")
             
-            # Use DuckDuckGo HTML API (no API key required, accessible in China)
-            search_url = "https://html.duckduckgo.com/html/"
-            async with httpx.AsyncClient(proxy=self.proxy, timeout=15.0) as client:
-                r = await client.post(
-                    search_url,
-                    data={"q": query, "b": f"{(n - 1) * 11}"},
-                    headers={"Accept": "application/json", "User-Agent": USER_AGENT}
-                )
-                r.raise_for_status()
-
-            # Parse HTML results
-            results = []
-            # Match result blocks
-            result_pattern = re.compile(r'<a rel="nofollow" class="result__a" href="([^"]+)"[^>]*>(.+?)</a>.*?<a class="result__snippet"[^>]*>(.+?)</a>', re.DOTALL)
-            for match in result_pattern.finditer(r.text):
-                url = match.group(1)
-                title = _strip_tags(match.group(2))
-                snippet = _strip_tags(match.group(3))
-                # Skip tracker URLs
-                if "uddg=" not in url:
-                    results.append({"title": title, "url": url, "description": snippet})
-                else:
-                    # Extract actual URL from UDDG parameter
-                    actual_url = re.search(r'uddg=([^&]+)', url)
-                    if actual_url:
-                        results.append({"title": title, "url": unquote(actual_url.group(1)), "description": snippet})
-            
-            results = results[:n]
-            if not results:
-                return f"No results for: {query}"
-
-            lines = [f"Results for: {query}\n"]
-            for i, item in enumerate(results, 1):
-                lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
-                if desc := item.get("description"):
-                    lines.append(f"   {desc}")
-            return "\n".join(lines)
+            # Use Tavily API if API key is provided
+            if self.api_key:
+                return await self._search_with_tavily(query, n)
+            else:
+                # Fallback to DuckDuckGo if no API key
+                return await self._search_with_duckduckgo(query, n)
+                
         except httpx.ProxyError as e:
             logger.error("WebSearch proxy error: {}", e)
             return f"Proxy error: {e}"
         except Exception as e:
             logger.error("WebSearch error: {}", e)
             return f"Error: {e}"
+    
+    async def _search_with_tavily(self, query: str, count: int) -> str:
+        """Search using Tavily API."""
+        search_url = "https://api.tavily.com/search"
+        async with httpx.AsyncClient(proxy=self.proxy, timeout=15.0) as client:
+            r = await client.post(
+                search_url,
+                json={
+                    "query": query,
+                    "api_key": self.api_key,
+                    "search_depth": "basic",
+                    "max_results": count
+                },
+                headers={"User-Agent": USER_AGENT}
+            )
+            r.raise_for_status()
+            data = r.json()
+        
+        results = []
+        for result in data.get("results", []):
+            results.append({
+                "title": result.get("title", ""),
+                "url": result.get("url", ""),
+                "description": result.get("description", "")
+            })
+        
+        if not results:
+            return f"No results for: {query}"
+        
+        lines = [f"Results for: {query}\n"]
+        for i, item in enumerate(results, 1):
+            lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
+            if desc := item.get("description"):
+                lines.append(f"   {desc}")
+        return "\n".join(lines)
+    
+    async def _search_with_duckduckgo(self, query: str, count: int) -> str:
+        """Search using DuckDuckGo HTML API (fallback)."""
+        search_url = "https://html.duckduckgo.com/html/"
+        async with httpx.AsyncClient(proxy=self.proxy, timeout=15.0) as client:
+            r = await client.post(
+                search_url,
+                data={"q": query, "b": f"{(count - 1) * 11}"},
+                headers={"User-Agent": USER_AGENT}
+            )
+            r.raise_for_status()
+
+        # Parse HTML results
+        results = []
+        # Match result blocks - more flexible pattern
+        result_pattern = re.compile(r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.+?)</a>', re.DOTALL)
+        snippet_pattern = re.compile(r'<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.+?)</a>', re.DOTALL)
+        
+        # Find all result links
+        for match in result_pattern.finditer(r.text):
+            url = match.group(1)
+            title = _strip_tags(match.group(2))
+            
+            # Find the next snippet after this result link
+            snippet = ""
+            snippet_match = snippet_pattern.search(r.text, match.end())
+            if snippet_match:
+                snippet = _strip_tags(snippet_match.group(1))
+            
+            # Skip tracker URLs
+            if "uddg=" not in url:
+                results.append({"title": title, "url": url, "description": snippet})
+            else:
+                # Extract actual URL from UDDG parameter
+                actual_url = re.search(r'uddg=([^&]+)', url)
+                if actual_url:
+                    results.append({"title": title, "url": unquote(actual_url.group(1)), "description": snippet})
+        
+        results = results[:count]
+        if not results:
+            return f"No results for: {query}"
+
+        lines = [f"Results for: {query}\n"]
+        for i, item in enumerate(results, 1):
+            lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
+            if desc := item.get("description"):
+                lines.append(f"   {desc}")
+        return "\n".join(lines)
 
 
 class WebFetchTool(Tool):
